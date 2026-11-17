@@ -5,7 +5,7 @@ name: Update AH data
 # (Blizzard API terms require deleting API data after 30 days).
 on:
   schedule:
-    - cron: "17 * * * *"
+    - cron: "17,47 * * * *"
   workflow_dispatch:
 permissions:
   contents: write
