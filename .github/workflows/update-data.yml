@@ -1,0 +1,63 @@
+name: Update AH data
+# Hourly: fetch a new snapshot, then deploy the site to GitHub Pages.
+# Data is never committed to main. The history files live on a "data" branch that is
+# force-pushed as a single commit each run, so no old copies pile up in git history
+# (Blizzard API terms require deleting API data after 30 days).
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: ah-data
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore history from data branch
+        run: |
+          if git fetch origin data:data 2>/dev/null; then
+            git show data:history.json.gz > history.json.gz || rm -f history.json.gz
+            git show data:items_meta.json.gz > items_meta.json.gz || rm -f items_meta.json.gz
+          else
+            echo "No history yet, starting fresh"
+          fi
+
+      - name: Fetch snapshot
+        run: python fetch_data.py
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+
+      - name: Save history (single commit, replaces previous)
+        run: |
+          mkdir -p /tmp/databranch && cp history.json.gz items_meta.json.gz /tmp/databranch/
+          cd /tmp/databranch
+          git init -q -b data
+          git config user.name "ah-ticker-bot"
+          git config user.email "ah-ticker-bot@users.noreply.github.com"
+          git add -A && git commit -qm "Latest history"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+
+      - name: Build site
+        run: |
+          mkdir _site
+          cp -r index.html privacy.html data.json items _site/
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+          retention-days: 1
+      - uses: actions/deploy-pages@v4

@@ -1,0 +1,5 @@
+data.json
+items/
+history.json.gz
+items_meta.json.gz
+__pycache__/
