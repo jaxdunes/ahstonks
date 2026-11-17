@@ -34,7 +34,7 @@ ITEMS_DIR = os.path.join(HERE, "items")
 HOURLY_KEEP_DAYS = 14
 DAILY_KEEP_DAYS = 30           # Blizzard API terms: keep API data no longer than 30 days
 META_REFRESH_DAYS = 29         # re-fetch item names before they reach 30 days old
-META_MISS_RETRY_HOURS = 24
+META_MISS_RETRY_HOURS = 6
 PER_ITEM_LOOKUPS_PER_RUN = 4000
 SPARK_POINTS = 28              # 7 days at 6-hour steps
 REFERENCE_ITEMS = {14047: "Runecloth", 2589: "Linen Cloth", 4306: "Silk Cloth"}
@@ -56,7 +56,7 @@ def http(url, headers=None, data=None):
             if e.code == 304:
                 return 304, dict(e.headers), b""
             if e.code in (429, 500, 502, 503, 504) and attempt < 3:
-                time.sleep(2 * (attempt + 1))
+                time.sleep((5 if e.code == 429 else 2) * (attempt + 1))
                 continue
             body = e.read()[:300].decode("utf8", "replace")
             raise RuntimeError(f"HTTP {e.code} for {url.split('?')[0]}: {body}") from None
@@ -159,6 +159,10 @@ def meta_from(d):
 def resolve_meta(api, ids, meta):
     now = time.time()
     items = meta.setdefault("items", {})
+    if meta.get("v") != 2:   # one-time: retry names that failed under the old lookup code
+        for k in [k for k, m in items.items() if "miss" in m]:
+            del items[k]
+        meta["v"] = 2
     def stale(i):
         m = items.get(str(i))
         if not m:
@@ -191,35 +195,58 @@ def resolve_meta(api, ids, meta):
         meta["ns"], meta["ns_t"] = ns, now
         print("item names from namespace", ns)
 
-    found = set()
-    # 1) bulk: item search, one call per 1,000-wide block of IDs
+    found, stats = set(), defaultdict(int)
+    # 1) bulk: item search, 1,000-wide blocks of IDs, following every page
     if meta.get("search_ok", True):
         for b in sorted({i // 1000 for i in need}):
-            lo, hi = b * 1000, b * 1000 + 999
-            try:
-                _, _, res = api.get("/data/wow/search/item", namespace=ns,
-                                    params={"id": f"[{lo},{hi}]", "orderby": "id", "_pageSize": "1000", "_page": "1"})
-            except RuntimeError as e:
-                print("item search unavailable, using per-item lookups:", e, file=sys.stderr)
-                meta["search_ok"] = False
+            lo, hi, page, pages = b * 1000, b * 1000 + 999, 1, 1
+            while page <= pages:
+                try:
+                    _, _, res = api.get("/data/wow/search/item", namespace=ns,
+                                        params={"id": f"[{lo},{hi}]", "orderby": "id", "_pageSize": "1000", "_page": str(page)})
+                except RuntimeError as e:
+                    print("item search failed, falling back to per-item lookups:", e, file=sys.stderr)
+                    if not found:
+                        meta["search_ok"] = False
+                    break
+                pages = min(int((res or {}).get("pageCount") or 1), 50)
+                for r in (res or {}).get("results", []):
+                    d = r.get("data") or {}
+                    if d.get("id") is not None:
+                        items[str(d["id"])] = meta_from(d)
+                        found.add(d["id"])
+                page += 1
+            if not meta.get("search_ok", True):
                 break
-            for r in (res or {}).get("results", []):
-                d = r.get("data") or {}
-                if d.get("id") is not None:
-                    items[str(d["id"])] = meta_from(d)
-                    found.add(d["id"])
-    # 2) one by one for anything left
+    stats["search"] = len([i for i in need if i in found])
+
+    # 2) one by one for anything left, trying other namespaces if Forever's doesn't have it
     rest = [i for i in need if i not in found][:PER_ITEM_LOOKUPS_PER_RUN]
+    others = [ns] + [t.format(r=api.region) for t in STATIC_NS if t.format(r=api.region) != ns]
     def one(i):
-        try:
-            _, _, d = api.get(f"/data/wow/item/{i}", namespace=ns, params={"locale": "en_US"})
-            return i, (meta_from(d) if d and d.get("id") == i else None)
-        except RuntimeError:
-            return i, None
+        not_found = 0
+        for cand in others:
+            try:
+                _, _, d = api.get(f"/data/wow/item/{i}", namespace=cand, params={"locale": "en_US"})
+                if d and d.get("id") == i:
+                    return i, meta_from(d), "lookup"
+            except RuntimeError as e:
+                if "HTTP 404" in str(e):
+                    not_found += 1
+                    continue
+                return i, None, "error"     # throttled or server hiccup: retry next run
+        return i, None, "notfound" if not_found == len(others) else "error"
     if rest:
-        with cf.ThreadPoolExecutor(max_workers=12) as ex:
-            for i, m in ex.map(one, rest):
-                items[str(i)] = m if m else {"miss": int(now)}
+        with cf.ThreadPoolExecutor(max_workers=4) as ex:
+            for i, m, how in ex.map(one, rest):
+                stats[how] += 1
+                if m:
+                    items[str(i)] = m
+                elif how == "notfound":
+                    items[str(i)] = {"miss": int(now)}
+                else:
+                    items.pop(str(i), None)     # no entry, so it's retried on the next run
+    print("item names: {search} via search, {lookup} via lookup, {notfound} not found, {error} errors (retry next run)".format(**{k: stats.get(k, 0) for k in ("search", "lookup", "notfound", "error")}))
     # drop entries past the 30-day limit
     for k in [k for k, m in items.items() if "t" in m and now - m["t"] > DAILY_KEEP_DAYS * 86400]:
         del items[k]
@@ -401,6 +428,7 @@ def write_outputs(cfg, hist, meta):
         "ruleset": cfg.get("ruleset", 2), "house_id": cfg["house_id"],
         "updated": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(timespec="seconds"),
         "source": "Blizzard Game Data API",
+        "snapshots": len(T), "first_snapshot": T[0] if T else None,
         "cols": ["id", "name", "cat", "quality", "price", "qty", "c24", "c7", "spark"],
         "cats": cats, "items": rows,
     }

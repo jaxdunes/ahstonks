@@ -515,7 +515,7 @@ async function load(){
   $('#badge').className = 'badge ' + (LIVE ? 'live' : 'demo');
   $('#updated').textContent = LIVE ? 'Updated ' + new Date(data.updated).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
   $('#note').textContent = LIVE
-    ? `Tracking ${ITEMS.length.toLocaleString()} items, snapshotted hourly. Prices are lowest per-unit asking prices, not completed sales.`
+    ? `Tracking ${ITEMS.length.toLocaleString()} items. History: ${(data.snapshots||0).toLocaleString()} hourly snapshot${data.snapshots===1?'':'s'}${data.first_snapshot ? ' since ' + new Date(data.first_snapshot*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : ''}. Prices are lowest per-unit asking prices, not completed sales.`
     : 'Showing generated demo prices so you can try the layout. Run fetch_data.py with your Blizzard API credentials for real Normal Horde US data.';
   buildCatSelect();
   renderTape(); renderSummary(); renderMovers(); renderList();
