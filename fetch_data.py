@@ -20,7 +20,7 @@ Forever auction routes are unofficial (community-found at launch):
   /data/wow/ruleset/{ruleset}/auctions/{house}[/commodities]
   namespace=dynamic-forever-{region}
 """
-import argparse, base64, concurrent.futures as cf, datetime as dt, email.utils, gzip, json, os, shutil, sys, time
+import argparse, base64, hashlib, concurrent.futures as cf, datetime as dt, email.utils, gzip, json, os, shutil, sys, time
 import urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 
@@ -51,10 +51,10 @@ def http(url, headers=None, data=None):
                 raw = r.read()
                 if r.headers.get("Content-Encoding") == "gzip":
                     raw = gzip.decompress(raw)
-                return r.status, dict(r.headers), raw
+                return r.status, {k.lower(): v for k, v in r.headers.items()}, raw
         except urllib.error.HTTPError as e:
             if e.code == 304:
-                return 304, dict(e.headers), b""
+                return 304, {k.lower(): v for k, v in e.headers.items()}, b""
             if e.code in (429, 500, 502, 503, 504) and attempt < 3:
                 time.sleep((5 if e.code == 429 else 2) * (attempt + 1))
                 continue
@@ -110,7 +110,7 @@ def fetch_house(api, ruleset, house, ims=None):
     path = f"/data/wow/ruleset/{ruleset}/auctions/{house}"
     status, headers, body = api.get(path, if_modified_since=ims)
     if status == 304:
-        return None, None, headers.get("Last-Modified")
+        return None, None, headers.get("last-modified")
     auctions = list((body or {}).get("auctions") or [])
     href = ((body or {}).get("commodities") or {}).get("href")
     try:
@@ -119,7 +119,7 @@ def fetch_house(api, ruleset, house, ims=None):
     except RuntimeError as e:
         print("commodities fetch failed:", e, file=sys.stderr)
         commodities = []
-    return auctions, commodities, headers.get("Last-Modified")
+    return auctions, commodities, headers.get("last-modified")
 
 
 def summarize(auctions, commodities, only=None):
@@ -468,7 +468,11 @@ def main():
             except Exception:
                 snap = int(time.time())
             s = summarize(auctions, commodities)
-            if add_snapshot(hist, snap, s, cfg.get("price_field", "min")):
+            sig = hashlib.sha1(json.dumps(sorted((k, v["min"], v["qty"]) for k, v in s.items())).encode()).hexdigest()
+            if sig == hist.get("last_sig"):
+                print("Auction data unchanged since the last snapshot; nothing new to record")
+            elif add_snapshot(hist, snap, s, cfg.get("price_field", "min")):
+                hist["last_sig"] = sig
                 hist["last_modified"] = lm
                 print(f"snapshot {lm}: {len(auctions)} auctions + {len(commodities)} commodities "
                       f"-> {len(s)} items ({time.time()-t0:.0f}s)")
