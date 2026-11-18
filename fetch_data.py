@@ -60,7 +60,7 @@ def http(url, headers=None, data=None):
                 continue
             body = e.read()[:300].decode("utf8", "replace")
             raise RuntimeError(f"HTTP {e.code} for {url.split('?')[0]}: {body}") from None
-        except (urllib.error.URLError, TimeoutError) as e:
+        except Exception as e:   # dropped connections, timeouts, truncated responses
             if attempt < 3:
                 time.sleep(2 * (attempt + 1))
                 continue
@@ -204,7 +204,7 @@ def resolve_meta(api, ids, meta):
                 try:
                     _, _, res = api.get("/data/wow/search/item", namespace=ns,
                                         params={"id": f"[{lo},{hi}]", "orderby": "id", "_pageSize": "1000", "_page": str(page)})
-                except RuntimeError as e:
+                except Exception as e:
                     print("item search failed, falling back to per-item lookups:", e, file=sys.stderr)
                     if not found:
                         meta["search_ok"] = False
@@ -230,7 +230,7 @@ def resolve_meta(api, ids, meta):
                 _, _, d = api.get(f"/data/wow/item/{i}", namespace=cand, params={"locale": "en_US"})
                 if d and d.get("id") == i:
                     return i, meta_from(d), "lookup"
-            except RuntimeError as e:
+            except Exception as e:
                 if "HTTP 404" in str(e):
                     not_found += 1
                     continue
@@ -477,8 +477,13 @@ def main():
                 print(f"snapshot {lm}: {len(auctions)} auctions + {len(commodities)} commodities "
                       f"-> {len(s)} items ({time.time()-t0:.0f}s)")
         update_daily(hist, int(time.time()))
-        resolve_meta(api, [int(k) for k in hist.get("items", {})], meta)
-        save_gz(HIST_PATH, hist)
+        save_gz(HIST_PATH, hist)          # the price snapshot is safe from here on
+        try:
+            resolve_meta(api, [int(k) for k in hist.get("items", {})], meta)
+        except Exception:
+            import traceback
+            print("Item name lookup hit an error; prices were still saved. Names retry next run.", file=sys.stderr)
+            traceback.print_exc()
         save_gz(META_PATH, meta)
     write_outputs(cfg, hist, meta)
 

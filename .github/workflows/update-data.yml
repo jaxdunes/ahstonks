@@ -41,8 +41,10 @@ jobs:
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
 
       - name: Save history (single commit, replaces previous)
+        if: always() && hashFiles('history.json.gz') != ''
         run: |
-          mkdir -p /tmp/databranch && cp history.json.gz items_meta.json.gz /tmp/databranch/
+          mkdir -p /tmp/databranch && cp history.json.gz /tmp/databranch/
+          [ -f items_meta.json.gz ] && cp items_meta.json.gz /tmp/databranch/ || true
           cd /tmp/databranch
           git init -q -b data
           git config user.name "ah-ticker-bot"
